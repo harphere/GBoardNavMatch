@@ -1,4 +1,4 @@
-# GboardNavMatch v1.0.8
+# GboardNavMatch v1.0.9
 
 Standalone LSPosed diagnostic module for Android 16 / Vector Legacy Bridge.
 
@@ -10,7 +10,7 @@ Standalone LSPosed diagnostic module for Android 16 / Vector Legacy Bridge.
 
 This avoids external ContentProvider discovery, which can fail under Android package-visibility rules when the injected code runs with Gboard's app identity.
 
-## v1.0.8 changes
+## v1.0.9 changes
 - Replaced the cross-app ContentProvider IPC path with an explicit broadcast bridge.
 - Removed all `content://dev.chet.gboardnavmatch.colors` lookups.
 - No longer attempts to hook abstract `android.view.Window#setNavigationBarColor`.
@@ -37,11 +37,11 @@ Expected Gboard-side messages:
     GboardNavMatch: apply onStartInputView #FF...... from=... age=...ms changed=N
 
 
-## v1.0.8 targeting change
+## v1.0.9 targeting change
 The IME DecorView is never recoloured. The module now scores bottom-anchored, keyboard-sized containers and prefers Gboard's `ShrinkableFrameView`, with `input_area` as a lower-priority diagnostic candidate. This prevents the full-screen colour wash seen in v1.0.4.
 
 
-## v1.0.8 keyboard-surface targeting
+## v1.0.9 keyboard-surface targeting
 
 - Never paints `ShrinkableFrameView`; it is treated as a structural wrapper only.
 - Targets `SoftKeyboardView` for the key-field background.
@@ -49,12 +49,22 @@ The IME DecorView is never recoloured. The module now scores bottom-anchored, ke
 - Re-applies after 180 ms because Gboard may finish rebinding its keyboard views after `onStartInputView`.
 - Logs background drawable class, size, y-position, visibility and alpha for the key surfaces.
 
-## v1.0.8 key-cap renderer experiment
+## v1.0.9 key-cap renderer experiment
 
-v1.0.8 keeps the v1.0.6 SoftKeyboardView background matching and adds a scoped drawing hook for Gboard's rendered key caps. While SoftKeyboardView is drawing, rounded-rectangle Paint objects are copied and recoloured to the currently matched navigation-bar colour. The original Paint is never mutated, so labels/icons drawn afterward retain their own colours. Diagnostic logs begin with `keycap roundRect` and report the source and replacement colours.
+v1.0.9 keeps the v1.0.6 SoftKeyboardView background matching and adds a scoped drawing hook for Gboard's rendered key caps. While SoftKeyboardView is drawing, rounded-rectangle Paint objects are copied and recoloured to the currently matched navigation-bar colour. The original Paint is never mutated, so labels/icons drawn afterward retain their own colours. Diagnostic logs begin with `keycap roundRect` and report the source and replacement colours.
 
 
-## v1.0.8
+## v1.0.9
 - Fixes Vector legacy compatibility compile error by logging the reflected draw method instead of `MethodHookParam.method`.
 - Applies the current app colour to the IME navigation bar, disables navigation-bar contrast enforcement, and updates light/dark navigation icon appearance.
 - Adds IME navigation-bar diagnostics.
+
+
+## v1.0.9
+
+- Adds targeted tinting for the Gboard suggestion/toolbar band above `SoftKeyboardView`.
+- Adds a Launcher3/Quickstep-side navigation-surface hook for 3-button navigation.
+- Launcher3 is now included in the suggested/default LSPosed scope.
+- Keeps the working v1.0.8 keycap renderer hook unchanged.
+
+Expected new logs include `suggestion/toolbar tint ...`, `toolbar target ...`, and `Launcher3 nav surface ...`.

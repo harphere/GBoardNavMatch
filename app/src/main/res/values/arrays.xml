@@ -1,5 +1,6 @@
 <resources>
     <string-array name="xposed_scope">
         <item>com.google.android.inputmethod.latin</item>
+        <item>com.android.launcher3</item>
     </string-array>
 </resources>

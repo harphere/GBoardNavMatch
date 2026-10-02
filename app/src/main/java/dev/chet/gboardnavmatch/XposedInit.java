@@ -36,6 +36,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final String MODULE = "dev.chet.gboardnavmatch";
     private static final String RECEIVER = "dev.chet.gboardnavmatch.StateReceiver";
     private static final String GBOARD = "com.google.android.inputmethod.latin";
+    private static final String LAUNCHER = "com.android.launcher3";
     private static volatile int lastPublished = Integer.MIN_VALUE;
     private static final Set<Class<?>> HOOKED_WINDOW_CLASSES =
             Collections.newSetFromMap(new IdentityHashMap<>());
@@ -44,6 +45,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final ThreadLocal<Integer> ACTIVE_KEY_COLOR = new ThreadLocal<>();
     private static volatile boolean softKeyboardDrawHookInstalled = false;
     private static volatile int keyPaintLogBudget = 24;
+    private static volatile long launcherLastRequestAt = 0L;
+    private static volatile int launcherLastAppliedColor = Integer.MIN_VALUE;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -52,8 +55,112 @@ public class XposedInit implements IXposedHookLoadPackage {
             log("loaded in Gboard process=" + lpparam.processName);
             installGboardHooks();
             installSoftKeyboardDrawingHook();
+        } else if (LAUNCHER.equals(lpparam.packageName)) {
+            log("loaded in Launcher3 process=" + lpparam.processName);
+            installLauncherNavHooks();
         } else if (!MODULE.equals(lpparam.packageName) && !"android".equals(lpparam.packageName)) {
             installPublisherHooks(lpparam);
+        }
+    }
+
+    private void installLauncherNavHooks() {
+        try {
+            Method layout = View.class.getMethod("layout", int.class, int.class, int.class, int.class);
+            XposedBridge.hookMethod(layout, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        View v = (View) param.thisObject;
+                        if (!isLikelyLauncherNavView(v)) return;
+                        long now = System.currentTimeMillis();
+                        if (now - launcherLastRequestAt < 250L) return;
+                        launcherLastRequestAt = now;
+                        requestLauncherStateAndTint(v);
+                    } catch (Throwable t) {
+                        log("Launcher3 nav layout handling failed " + t);
+                    }
+                }
+            });
+            log("Launcher3 navigation layout hook installed");
+        } catch (Throwable t) {
+            log("Launcher3 navigation layout hook failed " + t);
+        }
+    }
+
+    private boolean isLikelyLauncherNavView(View v) {
+        if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) return false;
+        View root = v.getRootView();
+        if (root == null || root.getWidth() <= 0 || root.getHeight() <= 0) return false;
+        int h = v.getHeight();
+        if (h < 80 || h > 180) return false;
+        int y = viewY(v);
+        int bottom = y + h;
+        if (bottom < root.getHeight() - 24) return false;
+
+        String cls = v.getClass().getName().toLowerCase(Locale.US);
+        String id = safeIdName(v);
+        boolean named = cls.contains("navbutton") || cls.contains("navbar")
+                || cls.contains("nearesttouchframe") || id.contains("nav")
+                || id.contains("button") || id.contains("taskbar");
+        boolean wide = v.getWidth() >= (int) (root.getWidth() * 0.55f);
+        return named || wide;
+    }
+
+    private void requestLauncherStateAndTint(View seed) {
+        try {
+            Context c = seed.getContext();
+            Intent i = new Intent(StateReceiver.ACTION_GET);
+            i.setComponent(new ComponentName(MODULE, RECEIVER));
+            c.sendOrderedBroadcast(i, null, new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    try {
+                        Bundle state = getResultExtras(false);
+                        if (state == null || !state.getBoolean("enabled", true)) return;
+                        int color = state.getInt(StateReceiver.KEY_COLOR, 0);
+                        int adjust = state.getInt("adjust", 0);
+                        if (color == 0 || Color.alpha(color) == 0) return;
+                        color = adjustBrightness(color, adjust);
+                        tintLauncherNavSurface(seed, color);
+                    } catch (Throwable t) {
+                        log("Launcher3 state reply failed " + t);
+                    }
+                }
+            }, null, Activity.RESULT_OK, null, null);
+        } catch (Throwable t) {
+            log("Launcher3 state request failed " + t);
+        }
+    }
+
+    private void tintLauncherNavSurface(View seed, int color) {
+        try {
+            View root = seed.getRootView();
+            if (root == null) return;
+            View best = seed;
+            View cur = seed;
+            for (int i = 0; i < 6; i++) {
+                if (!(cur.getParent() instanceof View)) break;
+                View parent = (View) cur.getParent();
+                int ph = parent.getHeight();
+                int py = viewY(parent);
+                int pb = py + ph;
+                if (ph >= 80 && ph <= 180 && pb >= root.getHeight() - 24) {
+                    best = parent;
+                    if (parent.getWidth() >= (int) (root.getWidth() * 0.95f)) break;
+                }
+                cur = parent;
+            }
+            best.setBackgroundColor(color);
+            best.invalidate();
+            if (launcherLastAppliedColor != color) {
+                launcherLastAppliedColor = color;
+                log(String.format(Locale.US,
+                        "Launcher3 nav surface #%08X class=%s id=%s size=%dx%d y=%d root=%dx%d",
+                        color, best.getClass().getName(), safeIdName(best), best.getWidth(), best.getHeight(),
+                        viewY(best), root.getWidth(), root.getHeight()));
+            }
+        } catch (Throwable t) {
+            log("Launcher3 nav tint failed " + t);
         }
     }
 
@@ -453,6 +560,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (targets.keyboardHolder != null) {
             logSurface("keyboardHolder", targets.keyboardHolder);
             if (tintExistingBackground(targets.keyboardHolder, color)) changed++;
+            changed += tintSuggestionToolbar(targets, color);
         }
 
         if (targets.keyboardViewHolder != null) {
@@ -467,6 +575,61 @@ public class XposedInit implements IXposedHookLoadPackage {
             logSurface("shrinkable(SKIPPED)", targets.shrinkable);
         }
         return changed;
+    }
+
+    private int tintSuggestionToolbar(SurfaceTargets targets, int color) {
+        if (!(targets.keyboardHolder instanceof ViewGroup) || targets.softKeyboard == null) return 0;
+        int softTop = viewY(targets.softKeyboard);
+        int holderTop = viewY(targets.keyboardHolder);
+        if (softTop <= holderTop) return 0;
+        int stripHeight = softTop - holderTop;
+        if (stripHeight < 40 || stripHeight > 180) return 0;
+
+        ToolbarTintResult result = new ToolbarTintResult();
+        tintToolbarZone((ViewGroup) targets.keyboardHolder, color, holderTop, softTop,
+                targets.keyboardHolder.getWidth(), result);
+        if (result.changed > 0) {
+            log(String.format(Locale.US,
+                    "suggestion/toolbar tint changed=%d zone=%d..%d height=%d",
+                    result.changed, holderTop, softTop, stripHeight));
+        } else {
+            log(String.format(Locale.US,
+                    "suggestion/toolbar target not found zone=%d..%d height=%d",
+                    holderTop, softTop, stripHeight));
+        }
+        return result.changed;
+    }
+
+    private void tintToolbarZone(ViewGroup group, int color, int top, int bottom, int fullWidth,
+                                 ToolbarTintResult result) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE || child.getWidth() <= 0 || child.getHeight() <= 0) continue;
+            int y = viewY(child);
+            int b = y + child.getHeight();
+            boolean overlaps = y < bottom && b > top;
+            boolean mostlyInZone = y >= top - 8 && b <= bottom + 12;
+            boolean wide = child.getWidth() >= (int) (fullWidth * 0.72f);
+            if (overlaps && mostlyInZone && wide && child.getHeight() >= 40 && child.getHeight() <= 180) {
+                child.setBackgroundColor(color);
+                child.invalidate();
+                result.changed++;
+                if (result.logBudget-- > 0) {
+                    log("toolbar target class=" + child.getClass().getName()
+                            + " id=" + safeIdName(child)
+                            + " size=" + child.getWidth() + "x" + child.getHeight()
+                            + " y=" + y);
+                }
+            }
+            if (child instanceof ViewGroup) {
+                tintToolbarZone((ViewGroup) child, color, top, bottom, fullWidth, result);
+            }
+        }
+    }
+
+    private static final class ToolbarTintResult {
+        int changed = 0;
+        int logBudget = 8;
     }
 
     private void scanSurfaceTargets(View v, int depth, SurfaceTargets out) {
