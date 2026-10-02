@@ -243,18 +243,19 @@ public class XposedInit implements IXposedHookLoadPackage {
                 return;
             }
 
-            View target = findKeyboardSurface(decor, decor.getWidth(), decor.getHeight());
-            int changed = 0;
-            if (target != null) {
-                target.setBackgroundColor(color);
-                changed = 1;
-                log("keyboard target class=" + target.getClass().getName()
-                        + " id=" + safeIdName(target)
-                        + " size=" + target.getWidth() + "x" + target.getHeight()
-                        + " y=" + viewY(target));
-            } else {
-                log("no keyboard surface candidate at " + why);
-            }
+            int changed = applyKeyboardSurfaces(decor, color, why);
+            // Gboard often finishes constructing/rebinding its keyboard hierarchy shortly after
+            // onStartInputView/onWindowShown. Re-apply once the final views are present.
+            final int finalColor = color;
+            decor.postDelayed(() -> {
+                try {
+                    int delayedChanged = applyKeyboardSurfaces(decor, finalColor, why + "/delayed");
+                    log("delayed apply " + why + " changed=" + delayedChanged);
+                } catch (Throwable t) {
+                    log("delayed apply failed " + why + " " + t);
+                }
+            }, 180L);
+
             log(String.format(Locale.US,
                     "apply %s #%08X from=%s age=%dms changed=%d root=%dx%d",
                     why, color, pkg, Math.max(0, System.currentTimeMillis() - time),
@@ -264,60 +265,112 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private View findKeyboardSurface(View root, int rootW, int rootH) {
-        KeyboardCandidate best = new KeyboardCandidate();
-        scanKeyboardCandidates(root, rootW, rootH, 0, best);
-        return best.view;
+    private int applyKeyboardSurfaces(View root, int color, String why) {
+        SurfaceTargets targets = new SurfaceTargets();
+        scanSurfaceTargets(root, 0, targets);
+        int changed = 0;
+
+        // Do NOT paint ShrinkableFrameView. It is a structural/animation wrapper and an
+        // opaque background on it obscures the keyboard rendering on current Gboard.
+        if (targets.softKeyboard != null) {
+            logSurface("softKeyboard", targets.softKeyboard);
+            // SoftKeyboardView is the renderer for the key field. Its background is drawn
+            // before its own key content, so this preserves key caps/labels.
+            targets.softKeyboard.setBackgroundColor(color);
+            changed++;
+        } else {
+            log("SoftKeyboardView not found at " + why);
+        }
+
+        // The holder includes the strip immediately above the key field. Only tint an
+        // existing drawable here; do not install a new opaque background on the wrapper.
+        if (targets.keyboardHolder != null) {
+            logSurface("keyboardHolder", targets.keyboardHolder);
+            if (tintExistingBackground(targets.keyboardHolder, color)) changed++;
+        }
+
+        if (targets.keyboardViewHolder != null) {
+            logSurface("keyboardViewHolder", targets.keyboardViewHolder);
+            if (tintExistingBackground(targets.keyboardViewHolder, color)) changed++;
+        }
+
+        if (targets.inputArea != null) {
+            logSurface("inputArea", targets.inputArea);
+        }
+        if (targets.shrinkable != null) {
+            logSurface("shrinkable(SKIPPED)", targets.shrinkable);
+        }
+        return changed;
     }
 
-    private void scanKeyboardCandidates(View v, int rootW, int rootH, int depth, KeyboardCandidate best) {
+    private void scanSurfaceTargets(View v, int depth, SurfaceTargets out) {
         try {
-            int w = v.getWidth();
-            int h = v.getHeight();
-            int y = viewY(v);
-            int bottom = y + h;
-            String idName = safeIdName(v);
-            String cls = v.getClass().getName().toLowerCase(Locale.US);
+            String cls = v.getClass().getName();
+            String lower = cls.toLowerCase(Locale.US);
+            String id = safeIdName(v);
 
-            // Never paint the IME DecorView or another near-full-screen container.
-            boolean fullScreenLike = depth == 0
-                    || (rootH > 0 && h >= rootH * 0.70f)
-                    || (rootW > 0 && rootH > 0 && w >= rootW * 0.95f && h >= rootH * 0.60f);
-
-            boolean wide = rootW > 0 && w >= rootW * 0.88f;
-            boolean keyboardHeight = rootH > 0 && h >= rootH * 0.20f && h <= rootH * 0.55f;
-            boolean bottomAnchored = rootH > 0 && bottom >= rootH * 0.82f;
-            boolean shrinkable = cls.contains("shrinkableframeview");
-            boolean strongName = containsAny(idName, "keyboard", "input_area", "inputarea", "keyboard_holder", "keyboardholder")
-                    || containsAny(cls, "keyboard");
-
-            if (!fullScreenLike && wide && keyboardHeight && bottomAnchored) {
-                int score = 0;
-                if (shrinkable) score += 1000;
-                if (strongName) score += 500;
-                score += Math.min(400, h / 2);
-                score += Math.min(200, w / 10);
-                // Prefer a whole keyboard container over the smaller input_area child.
-                if ("input_area".equals(idName)) score -= 150;
-
-                log("candidate depth=" + depth + " class=" + v.getClass().getName()
-                        + " id=" + idName + " size=" + w + "x" + h
-                        + " y=" + y + " bottom=" + bottom + " score=" + score);
-
-                if (score > best.score) {
-                    best.score = score;
-                    best.view = v;
-                }
+            if (lower.endsWith(".softkeyboardview") || lower.contains("widgets.softkeyboardview")) {
+                out.softKeyboard = v;
+            } else if (lower.endsWith(".keyboardviewholder") || lower.contains("keyboard.impl.keyboardviewholder")) {
+                out.keyboardViewHolder = v;
+            } else if (lower.endsWith(".keyboardholder") || "keyboard_holder".equals(id)) {
+                out.keyboardHolder = v;
+            } else if (lower.contains("shrinkableframeview")) {
+                out.shrinkable = v;
             }
+            if ("input_area".equals(id)) out.inputArea = v;
         } catch (Throwable ignored) {
         }
 
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) {
-                scanKeyboardCandidates(g.getChildAt(i), rootW, rootH, depth + 1, best);
+                scanSurfaceTargets(g.getChildAt(i), depth + 1, out);
             }
         }
+    }
+
+    private boolean tintExistingBackground(View v, int color) {
+        try {
+            Drawable bg = v.getBackground();
+            if (bg == null) return false;
+            Drawable copy = bg.mutate();
+            copy.setTint(color);
+            v.setBackground(copy);
+            return true;
+        } catch (Throwable t) {
+            log("background tint failed class=" + v.getClass().getName() + " " + t);
+            return false;
+        }
+    }
+
+    private void logSurface(String label, View v) {
+        try {
+            Drawable bg = v.getBackground();
+            String bgName = bg == null ? "null" : bg.getClass().getName();
+            String bgColor = "";
+            if (bg instanceof ColorDrawable) {
+                bgColor = String.format(Locale.US, " color=#%08X", ((ColorDrawable) bg).getColor());
+            }
+            log("surface " + label
+                    + " class=" + v.getClass().getName()
+                    + " id=" + safeIdName(v)
+                    + " size=" + v.getWidth() + "x" + v.getHeight()
+                    + " y=" + viewY(v)
+                    + " vis=" + v.getVisibility()
+                    + " alpha=" + v.getAlpha()
+                    + " bg=" + bgName + bgColor);
+        } catch (Throwable t) {
+            log("surface log failed " + label + " " + t);
+        }
+    }
+
+    private static final class SurfaceTargets {
+        View softKeyboard;
+        View keyboardViewHolder;
+        View keyboardHolder;
+        View inputArea;
+        View shrinkable;
     }
 
     private static String safeIdName(View v) {
@@ -340,16 +393,6 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private static final class KeyboardCandidate {
-        View view;
-        int score = Integer.MIN_VALUE;
-    }
-
-    private static boolean containsAny(String s, String... terms) {
-        if (s == null) return false;
-        for (String t : terms) if (s.contains(t)) return true;
-        return false;
-    }
 
     private static int adjustBrightness(int color, int pct) {
         if (pct == 0) return color;
