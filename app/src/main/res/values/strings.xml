@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Gboard Nav Match</string>
+    <string name="xposed_description">Matches Gboard's keyboard surface to the foreground app navigation bar colour.</string>
+</resources>

@@ -1,0 +1,2 @@
+-keep class dev.chet.gboardnavmatch.XposedInit { *; }
+-keep class dev.chet.gboardnavmatch.ColorProvider { *; }
