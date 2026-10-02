@@ -1,2 +1,2 @@
 -keep class dev.chet.gboardnavmatch.XposedInit { *; }
--keep class dev.chet.gboardnavmatch.ColorProvider { *; }
+-keep class dev.chet.gboardnavmatch.StateReceiver { *; }
