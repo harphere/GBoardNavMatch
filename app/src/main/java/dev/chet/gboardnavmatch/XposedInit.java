@@ -16,6 +16,8 @@ import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -291,7 +293,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 keyPaintLogBudget--;
                                 log(String.format(Locale.US,
                                         "keycap roundRect %s src=#%08X -> #%08X alpha=%d",
-                                        param.method.getDeclaringClass().getName(), src, out, alpha));
+                                        m.getDeclaringClass().getName(), src, out, alpha));
                             }
                         }
                     });
@@ -356,7 +358,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             Window win = dialog.getWindow();
-            win.setNavigationBarColor(color);
+            applyImeNavigationBar(win, color, why);
             View decor = win.getDecorView();
             if (decor == null) {
                 log("IME decor unavailable at " + why);
@@ -384,6 +386,49 @@ public class XposedInit implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("apply failed " + why + " " + t);
         }
+    }
+
+
+    private void applyImeNavigationBar(Window win, int color, String why) {
+        try {
+            // Ensure Android is allowed to draw the requested navigation-bar colour directly.
+            win.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            win.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
+            try {
+                win.setNavigationBarContrastEnforced(false);
+            } catch (Throwable t) {
+                log("nav contrast control unavailable " + t);
+            }
+            win.setNavigationBarColor(color);
+
+            View decor = win.getDecorView();
+            if (decor != null) {
+                WindowInsetsController controller = decor.getWindowInsetsController();
+                if (controller != null) {
+                    final int mask = WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    // LIGHT_NAVIGATION_BARS means dark navigation icons, appropriate on a light colour.
+                    boolean lightBackground = isLightColor(color);
+                    controller.setSystemBarsAppearance(lightBackground ? mask : 0, mask);
+                    log(String.format(Locale.US,
+                            "IME nav bar #%08X lightIcons=%s reason=%s",
+                            color, !lightBackground, why));
+                } else {
+                    log(String.format(Locale.US,
+                            "IME nav bar #%08X controller=null reason=%s", color, why));
+                }
+            }
+        } catch (Throwable t) {
+            log("IME nav bar apply failed " + why + " " + t);
+        }
+    }
+
+    private boolean isLightColor(int color) {
+        double r = Color.red(color) / 255.0;
+        double g = Color.green(color) / 255.0;
+        double b = Color.blue(color) / 255.0;
+        // Simple perceptual luminance is sufficient for selecting system navigation icon contrast.
+        double luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+        return luminance >= 0.62;
     }
 
     private int applyKeyboardSurfaces(View root, int color, String why) {
