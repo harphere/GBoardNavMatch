@@ -1,4 +1,4 @@
-# Gboard Nav Match v1.0.0
+# Gboard Nav Match v1.0.1
 
 Diagnostic LSPosed module for Android 16 that attempts to match Gboard's keyboard surface to the current foreground app's navigation-bar colour.
 
@@ -18,7 +18,7 @@ Required:
 
 Also select **each app whose navigation-bar colour you want Gboard to match**. For the first test, select a few known apps such as AquaMail, eero, Costco, Join and WhatsApp rather than your entire app list.
 
-Do **not** scope Android System or System UI for v1.0.0.
+Do **not** scope Android System or System UI for v1.0.1.
 
 ## First test
 
@@ -58,4 +58,4 @@ Push this project to GitHub and run **Build APK**. The workflow intentionally in
 
 - Transparent nav bars are ignored rather than trying to resolve the composited colour underneath them.
 - Gboard uses obfuscated/private rendering internals, so this build deliberately uses framework IME hooks plus view-tree diagnostics rather than hard-coded Gboard class names.
-- Foreground icons/key labels are left untouched in v1.0.0; first we need to confirm which Gboard surface views are stable on your installed build.
+- Foreground icons/key labels are left untouched in v1.0.1; first we need to confirm which Gboard surface views are stable on your installed build.

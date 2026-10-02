@@ -65,7 +65,7 @@ public class MainActivity extends Activity {
         root.addView(reset);
 
         TextView note = new TextView(this);
-        note.setText("v1.0.0 diagnostic build\nVector/LSPosed log tag: GboardNavMatch");
+        note.setText("v1.0.1 diagnostic build\nVector/LSPosed log tag: GboardNavMatch");
         note.setPadding(0, 32, 0, 0);
         root.addView(note);
         setContentView(root);
