@@ -2,6 +2,7 @@ package dev.chet.gboardnavmatch;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -15,7 +16,7 @@ public class MainActivity extends Activity {
     private TextView value;
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
-        var p = getSharedPreferences(ColorProvider.PREFS, 0);
+        SharedPreferences p = getSharedPreferences(ColorProvider.PREFS, 0);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(48, 48, 48, 48);
@@ -65,7 +66,7 @@ public class MainActivity extends Activity {
         root.addView(reset);
 
         TextView note = new TextView(this);
-        note.setText("v1.0.1 diagnostic build\nVector/LSPosed log tag: GboardNavMatch");
+        note.setText("v1.0.2 diagnostic build\nVector/LSPosed log tag: GboardNavMatch");
         note.setPadding(0, 32, 0, 0);
         root.addView(note);
         setContentView(root);

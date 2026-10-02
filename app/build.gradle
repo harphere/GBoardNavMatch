@@ -8,8 +8,13 @@ android {
         applicationId 'dev.chet.gboardnavmatch'
         minSdk 31
         targetSdk 36
-        versionCode 10001
-        versionName '1.0.1'
+        versionCode 10002
+        versionName '1.0.2'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     buildTypes {
