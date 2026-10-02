@@ -1,4 +1,4 @@
-# GboardNavMatch v1.0.4
+# GboardNavMatch v1.0.5
 
 Standalone LSPosed diagnostic module for Android 16 / Vector Legacy Bridge.
 
@@ -10,7 +10,7 @@ Standalone LSPosed diagnostic module for Android 16 / Vector Legacy Bridge.
 
 This avoids external ContentProvider discovery, which can fail under Android package-visibility rules when the injected code runs with Gboard's app identity.
 
-## v1.0.4 changes
+## v1.0.5 changes
 - Replaced the cross-app ContentProvider IPC path with an explicit broadcast bridge.
 - Removed all `content://dev.chet.gboardnavmatch.colors` lookups.
 - No longer attempts to hook abstract `android.view.Window#setNavigationBarColor`.
@@ -35,3 +35,7 @@ Expected Gboard-side messages:
     GboardNavMatch: onStartInputView hook installed
     GboardNavMatch: state request sent onStartInputView
     GboardNavMatch: apply onStartInputView #FF...... from=... age=...ms changed=N
+
+
+## v1.0.5 targeting change
+The IME DecorView is never recoloured. The module now scores bottom-anchored, keyboard-sized containers and prefers Gboard's `ShrinkableFrameView`, with `input_area` as a lower-priority diagnostic candidate. This prevents the full-screen colour wash seen in v1.0.4.

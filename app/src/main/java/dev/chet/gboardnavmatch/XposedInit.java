@@ -243,7 +243,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                 return;
             }
 
-            int changed = recolorTree(decor, color, decor.getWidth(), decor.getHeight(), 0);
+            View target = findKeyboardSurface(decor, decor.getWidth(), decor.getHeight());
+            int changed = 0;
+            if (target != null) {
+                target.setBackgroundColor(color);
+                changed = 1;
+                log("keyboard target class=" + target.getClass().getName()
+                        + " id=" + safeIdName(target)
+                        + " size=" + target.getWidth() + "x" + target.getHeight()
+                        + " y=" + viewY(target));
+            } else {
+                log("no keyboard surface candidate at " + why);
+            }
             log(String.format(Locale.US,
                     "apply %s #%08X from=%s age=%dms changed=%d root=%dx%d",
                     why, color, pkg, Math.max(0, System.currentTimeMillis() - time),
@@ -253,42 +264,85 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private int recolorTree(View v, int color, int rootW, int rootH, int depth) {
-        int changed = 0;
+    private View findKeyboardSurface(View root, int rootW, int rootH) {
+        KeyboardCandidate best = new KeyboardCandidate();
+        scanKeyboardCandidates(root, rootW, rootH, 0, best);
+        return best.view;
+    }
+
+    private void scanKeyboardCandidates(View v, int rootW, int rootH, int depth, KeyboardCandidate best) {
         try {
-            int w = v.getWidth(), h = v.getHeight();
-            Drawable bg = v.getBackground();
-            boolean huge = rootW > 0 && rootH > 0 && w >= rootW * 0.70f && h >= rootH * 0.35f;
-            String idName = "";
-            try {
-                if (v.getId() != View.NO_ID) {
-                    idName = v.getResources().getResourceEntryName(v.getId()).toLowerCase(Locale.US);
-                }
-            } catch (Throwable ignored) {
-            }
+            int w = v.getWidth();
+            int h = v.getHeight();
+            int y = viewY(v);
+            int bottom = y + h;
+            String idName = safeIdName(v);
             String cls = v.getClass().getName().toLowerCase(Locale.US);
-            boolean named = containsAny(idName, "keyboard", "ime", "input", "body", "root", "container", "background")
-                    || containsAny(cls, "keyboard", "ime");
-            if (depth == 0 || huge || named) {
-                if (bg == null || bg instanceof ColorDrawable || depth == 0) {
-                    v.setBackgroundColor(color);
-                    changed++;
-                    if (changed <= 12) {
-                        log("candidate depth=" + depth + " class=" + v.getClass().getName()
-                                + " id=" + idName + " size=" + w + "x" + h
-                                + " huge=" + huge + " named=" + named);
-                    }
+
+            // Never paint the IME DecorView or another near-full-screen container.
+            boolean fullScreenLike = depth == 0
+                    || (rootH > 0 && h >= rootH * 0.70f)
+                    || (rootW > 0 && rootH > 0 && w >= rootW * 0.95f && h >= rootH * 0.60f);
+
+            boolean wide = rootW > 0 && w >= rootW * 0.88f;
+            boolean keyboardHeight = rootH > 0 && h >= rootH * 0.20f && h <= rootH * 0.55f;
+            boolean bottomAnchored = rootH > 0 && bottom >= rootH * 0.82f;
+            boolean shrinkable = cls.contains("shrinkableframeview");
+            boolean strongName = containsAny(idName, "keyboard", "input_area", "inputarea", "keyboard_holder", "keyboardholder")
+                    || containsAny(cls, "keyboard");
+
+            if (!fullScreenLike && wide && keyboardHeight && bottomAnchored) {
+                int score = 0;
+                if (shrinkable) score += 1000;
+                if (strongName) score += 500;
+                score += Math.min(400, h / 2);
+                score += Math.min(200, w / 10);
+                // Prefer a whole keyboard container over the smaller input_area child.
+                if ("input_area".equals(idName)) score -= 150;
+
+                log("candidate depth=" + depth + " class=" + v.getClass().getName()
+                        + " id=" + idName + " size=" + w + "x" + h
+                        + " y=" + y + " bottom=" + bottom + " score=" + score);
+
+                if (score > best.score) {
+                    best.score = score;
+                    best.view = v;
                 }
             }
         } catch (Throwable ignored) {
         }
+
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) {
-                changed += recolorTree(g.getChildAt(i), color, rootW, rootH, depth + 1);
+                scanKeyboardCandidates(g.getChildAt(i), rootW, rootH, depth + 1, best);
             }
         }
-        return changed;
+    }
+
+    private static String safeIdName(View v) {
+        try {
+            if (v.getId() != View.NO_ID) {
+                return v.getResources().getResourceEntryName(v.getId()).toLowerCase(Locale.US);
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    private static int viewY(View v) {
+        try {
+            int[] loc = new int[2];
+            v.getLocationInWindow(loc);
+            return loc[1];
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private static final class KeyboardCandidate {
+        View view;
+        int score = Integer.MIN_VALUE;
     }
 
     private static boolean containsAny(String s, String... terms) {
