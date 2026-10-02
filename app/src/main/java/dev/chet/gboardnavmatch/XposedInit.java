@@ -6,6 +6,9 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.inputmethodservice.InputMethodService;
@@ -34,6 +37,11 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile int lastPublished = Integer.MIN_VALUE;
     private static final Set<Class<?>> HOOKED_WINDOW_CLASSES =
             Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<Method> HOOKED_ROUNDRECT_METHODS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final ThreadLocal<Integer> ACTIVE_KEY_COLOR = new ThreadLocal<>();
+    private static volatile boolean softKeyboardDrawHookInstalled = false;
+    private static volatile int keyPaintLogBudget = 24;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -41,6 +49,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (GBOARD.equals(lpparam.packageName)) {
             log("loaded in Gboard process=" + lpparam.processName);
             installGboardHooks();
+            installSoftKeyboardDrawingHook();
         } else if (!MODULE.equals(lpparam.packageName) && !"android".equals(lpparam.packageName)) {
             installPublisherHooks(lpparam);
         }
@@ -188,6 +197,116 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
+    private void installSoftKeyboardDrawingHook() {
+        if (softKeyboardDrawHookInstalled) return;
+        synchronized (XposedInit.class) {
+            if (softKeyboardDrawHookInstalled) return;
+            try {
+                Method draw = View.class.getMethod("draw", Canvas.class);
+                XposedBridge.hookMethod(draw, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            View v = (View) param.thisObject;
+                            if (!isSoftKeyboardView(v)) return;
+                            Canvas canvas = (Canvas) param.args[0];
+                            ensureRoundRectHooks(canvas);
+                            Integer color = currentAppliedColor;
+                            if (color != null) ACTIVE_KEY_COLOR.set(color);
+                        } catch (Throwable t) {
+                            log("SoftKeyboardView draw begin failed " + t);
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (isSoftKeyboardView((View) param.thisObject)) {
+                                ACTIVE_KEY_COLOR.remove();
+                            }
+                        } catch (Throwable ignored) {
+                            ACTIVE_KEY_COLOR.remove();
+                        }
+                    }
+                });
+                softKeyboardDrawHookInstalled = true;
+                log("SoftKeyboardView draw interception installed");
+            } catch (Throwable t) {
+                log("SoftKeyboardView draw interception failed " + t);
+            }
+        }
+    }
+
+    private static volatile Integer currentAppliedColor = null;
+
+    private boolean isSoftKeyboardView(View v) {
+        if (v == null) return false;
+        String n = v.getClass().getName().toLowerCase(Locale.US);
+        return n.endsWith(".softkeyboardview") || n.contains("widgets.softkeyboardview");
+    }
+
+    private void ensureRoundRectHooks(Canvas canvas) {
+        if (canvas == null) return;
+        Class<?> c = canvas.getClass();
+        int installed = 0;
+        while (c != null && Canvas.class.isAssignableFrom(c)) {
+            Method[] methods;
+            try {
+                methods = c.getDeclaredMethods();
+            } catch (Throwable t) {
+                c = c.getSuperclass();
+                continue;
+            }
+            for (Method m : methods) {
+                if (!"drawRoundRect".equals(m.getName())) continue;
+                Class<?>[] types = m.getParameterTypes();
+                if (types.length == 0 || !Paint.class.equals(types[types.length - 1])) continue;
+                if (Modifier.isAbstract(m.getModifiers())) continue;
+                synchronized (HOOKED_ROUNDRECT_METHODS) {
+                    if (HOOKED_ROUNDRECT_METHODS.contains(m)) continue;
+                    HOOKED_ROUNDRECT_METHODS.add(m);
+                }
+                try {
+                    m.setAccessible(true);
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Integer target = ACTIVE_KEY_COLOR.get();
+                            if (target == null || param.args == null || param.args.length == 0) return;
+                            int pi = param.args.length - 1;
+                            if (!(param.args[pi] instanceof Paint)) return;
+                            Paint original = (Paint) param.args[pi];
+                            Paint replacement = new Paint(original);
+                            int src = original.getColor();
+                            int alpha = Color.alpha(src);
+                            if (alpha == 0) alpha = original.getAlpha();
+                            int out = Color.argb(alpha,
+                                    Color.red(target), Color.green(target), Color.blue(target));
+                            replacement.setShader((Shader) null);
+                            replacement.setColorFilter(null);
+                            replacement.setColor(out);
+                            replacement.setAlpha(alpha);
+                            param.args[pi] = replacement;
+                            if (keyPaintLogBudget > 0) {
+                                keyPaintLogBudget--;
+                                log(String.format(Locale.US,
+                                        "keycap roundRect %s src=#%08X -> #%08X alpha=%d",
+                                        param.method.getDeclaringClass().getName(), src, out, alpha));
+                            }
+                        }
+                    });
+                    installed++;
+                } catch (Throwable t) {
+                    log("roundRect hook failed " + m + " " + t);
+                }
+            }
+            c = c.getSuperclass();
+        }
+        if (installed > 0) {
+            log("keycap roundRect hooks installed=" + installed + " canvas=" + canvas.getClass().getName());
+        }
+    }
+
     private void requestAndApply(InputMethodService ime, String why) {
         try {
             Intent i = new Intent(StateReceiver.ACTION_GET);
@@ -229,6 +348,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             color = adjustBrightness(color, adjust);
+            currentAppliedColor = color;
             android.app.Dialog dialog = ime.getWindow();
             if (dialog == null || dialog.getWindow() == null) {
                 log("IME window unavailable at " + why);
@@ -244,6 +364,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             int changed = applyKeyboardSurfaces(decor, color, why);
+            decor.invalidate();
             // Gboard often finishes constructing/rebinding its keyboard hierarchy shortly after
             // onStartInputView/onWindowShown. Re-apply once the final views are present.
             final int finalColor = color;
