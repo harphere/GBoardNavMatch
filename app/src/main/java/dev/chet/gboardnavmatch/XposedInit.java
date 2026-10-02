@@ -19,7 +19,6 @@ import java.util.Locale;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class XposedInit implements IXposedHookLoadPackage {
@@ -40,7 +39,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private void installPublisherHooks(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+            Method onResume = Activity.class.getDeclaredMethod("onResume");
+            onResume.setAccessible(true);
+            XposedBridge.hookMethod(onResume, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         Activity a = (Activity) param.thisObject;
@@ -48,7 +49,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     } catch (Throwable t) { log("onResume publish failed " + t); }
                 }
             });
-            XposedHelpers.findAndHookMethod(Window.class, "setNavigationBarColor", int.class, new XC_MethodHook() {
+
+            Method setNavigationBarColor = Window.class.getMethod("setNavigationBarColor", int.class);
+            XposedBridge.hookMethod(setNavigationBarColor, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         Window w = (Window) param.thisObject;
@@ -79,15 +82,19 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private void installGboardHooks(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            XposedHelpers.findAndHookMethod(InputMethodService.class, "onWindowShown", new XC_MethodHook() {
+            Method onWindowShown = InputMethodService.class.getMethod("onWindowShown");
+            XposedBridge.hookMethod(onWindowShown, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) { applyToIme((InputMethodService) param.thisObject, "onWindowShown"); }
             });
+            log("onWindowShown hook installed");
         } catch (Throwable t) { log("onWindowShown hook failed " + t); }
 
         try {
-            XposedHelpers.findAndHookMethod(InputMethodService.class, "onStartInputView", android.view.inputmethod.EditorInfo.class, boolean.class, new XC_MethodHook() {
+            Method onStartInputView = InputMethodService.class.getMethod("onStartInputView", android.view.inputmethod.EditorInfo.class, boolean.class);
+            XposedBridge.hookMethod(onStartInputView, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) { applyToIme((InputMethodService) param.thisObject, "onStartInputView"); }
             });
+            log("onStartInputView hook installed");
         } catch (Throwable t) { log("onStartInputView hook failed " + t); }
     }
 
