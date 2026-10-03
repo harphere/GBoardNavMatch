@@ -18,6 +18,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -25,6 +26,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -47,6 +49,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile int keyPaintLogBudget = 24;
     private static volatile long launcherLastRequestAt = 0L;
     private static volatile int launcherLastAppliedColor = Integer.MIN_VALUE;
+    private static volatile String currentInputPackage = "";
+    private static volatile String currentAppliedPackage = "";
+    private static final WeakHashMap<View, Drawable> LAUNCHER_ORIGINAL_BACKGROUNDS = new WeakHashMap<>();
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -116,10 +121,21 @@ public class XposedInit implements IXposedHookLoadPackage {
                 public void onReceive(Context context, Intent intent) {
                     try {
                         Bundle state = getResultExtras(false);
-                        if (state == null || !state.getBoolean("enabled", true)) return;
+                        if (state == null || !state.getBoolean("enabled", true)) {
+                            restoreLauncherNavSurface(seed);
+                            return;
+                        }
+                        boolean imeVisible = state.getBoolean(StateReceiver.KEY_IME_VISIBLE, false);
+                        if (!imeVisible) {
+                            restoreLauncherNavSurface(seed);
+                            return;
+                        }
                         int color = state.getInt(StateReceiver.KEY_COLOR, 0);
                         int adjust = state.getInt("adjust", 0);
-                        if (color == 0 || Color.alpha(color) == 0) return;
+                        if (color == 0 || Color.alpha(color) == 0) {
+                            restoreLauncherNavSurface(seed);
+                            return;
+                        }
                         color = adjustBrightness(color, adjust);
                         tintLauncherNavSurface(seed, color);
                     } catch (Throwable t) {
@@ -150,6 +166,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
                 cur = parent;
             }
+            synchronized (LAUNCHER_ORIGINAL_BACKGROUNDS) {
+                if (!LAUNCHER_ORIGINAL_BACKGROUNDS.containsKey(best)) {
+                    LAUNCHER_ORIGINAL_BACKGROUNDS.put(best, best.getBackground());
+                }
+            }
             best.setBackgroundColor(color);
             best.invalidate();
             if (launcherLastAppliedColor != color) {
@@ -161,6 +182,40 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             log("Launcher3 nav tint failed " + t);
+        }
+    }
+
+    private void restoreLauncherNavSurface(View seed) {
+        try {
+            View root = seed.getRootView();
+            if (root == null) return;
+            View best = seed;
+            View cur = seed;
+            for (int i = 0; i < 6; i++) {
+                if (!(cur.getParent() instanceof View)) break;
+                View parent = (View) cur.getParent();
+                int ph = parent.getHeight();
+                int py = viewY(parent);
+                int pb = py + ph;
+                if (ph >= 80 && ph <= 180 && pb >= root.getHeight() - 24) {
+                    best = parent;
+                    if (parent.getWidth() >= (int) (root.getWidth() * 0.95f)) break;
+                }
+                cur = parent;
+            }
+            Drawable original;
+            synchronized (LAUNCHER_ORIGINAL_BACKGROUNDS) {
+                original = LAUNCHER_ORIGINAL_BACKGROUNDS.get(best);
+            }
+            best.setBackground(original);
+            best.invalidate();
+            if (launcherLastAppliedColor != Integer.MIN_VALUE) {
+                log("Launcher3 nav surface restored class=" + best.getClass().getName()
+                        + " id=" + safeIdName(best));
+            }
+            launcherLastAppliedColor = Integer.MIN_VALUE;
+        } catch (Throwable t) {
+            log("Launcher3 nav restore failed " + t);
         }
     }
 
@@ -283,7 +338,10 @@ public class XposedInit implements IXposedHookLoadPackage {
             XposedBridge.hookMethod(onWindowShown, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    requestAndApply((InputMethodService) param.thisObject, "onWindowShown");
+                    InputMethodService ime = (InputMethodService) param.thisObject;
+                    String pkg = editorPackage(ime.getCurrentInputEditorInfo());
+                    setImeVisible(ime, true, pkg, "onWindowShown");
+                    requestAndApply(ime, "onWindowShown", pkg);
                 }
             });
             log("onWindowShown hook installed");
@@ -293,16 +351,79 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         try {
             Method onStartInputView = InputMethodService.class.getMethod(
-                    "onStartInputView", android.view.inputmethod.EditorInfo.class, boolean.class);
+                    "onStartInputView", EditorInfo.class, boolean.class);
             XposedBridge.hookMethod(onStartInputView, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    requestAndApply((InputMethodService) param.thisObject, "onStartInputView");
+                    InputMethodService ime = (InputMethodService) param.thisObject;
+                    EditorInfo info = (EditorInfo) param.args[0];
+                    String pkg = editorPackage(info);
+                    if (!pkg.equals(currentInputPackage)) {
+                        currentInputPackage = pkg;
+                        currentAppliedColor = null;
+                        currentAppliedPackage = "";
+                        log("input package changed -> " + pkg + "; cleared stale render colour");
+                    }
+                    setImeVisible(ime, true, pkg, "onStartInputView");
+                    requestAndApply(ime, "onStartInputView", pkg);
                 }
             });
             log("onStartInputView hook installed");
         } catch (Throwable t) {
             log("onStartInputView hook failed " + t);
+        }
+
+        try {
+            Method onWindowHidden = InputMethodService.class.getMethod("onWindowHidden");
+            XposedBridge.hookMethod(onWindowHidden, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    InputMethodService ime = (InputMethodService) param.thisObject;
+                    setImeVisible(ime, false, currentInputPackage, "onWindowHidden");
+                    currentAppliedColor = null;
+                    currentAppliedPackage = "";
+                }
+            });
+            log("onWindowHidden hook installed");
+        } catch (Throwable t) {
+            log("onWindowHidden hook failed " + t);
+        }
+
+        try {
+            Method onFinishInputView = InputMethodService.class.getMethod("onFinishInputView", boolean.class);
+            XposedBridge.hookMethod(onFinishInputView, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    InputMethodService ime = (InputMethodService) param.thisObject;
+                    setImeVisible(ime, false, currentInputPackage, "onFinishInputView");
+                    currentAppliedColor = null;
+                    currentAppliedPackage = "";
+                }
+            });
+            log("onFinishInputView hook installed");
+        } catch (Throwable t) {
+            log("onFinishInputView hook failed " + t);
+        }
+    }
+
+    private String editorPackage(EditorInfo info) {
+        try {
+            return info != null && info.packageName != null ? info.packageName : "";
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private void setImeVisible(Context c, boolean visible, String pkg, String why) {
+        try {
+            Intent i = new Intent(StateReceiver.ACTION_IME);
+            i.setComponent(new ComponentName(MODULE, RECEIVER));
+            i.putExtra(StateReceiver.KEY_IME_VISIBLE, visible);
+            i.putExtra(StateReceiver.KEY_IME_PACKAGE, pkg == null ? "" : pkg);
+            c.sendBroadcast(i);
+            log("IME visible=" + visible + " pkg=" + pkg + " reason=" + why);
+        } catch (Throwable t) {
+            log("IME visibility publish failed " + why + " " + t);
         }
     }
 
@@ -321,7 +442,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                             Canvas canvas = (Canvas) param.args[0];
                             ensureRoundRectHooks(canvas);
                             Integer color = currentAppliedColor;
-                            if (color != null) ACTIVE_KEY_COLOR.set(color);
+                            if (color != null && currentAppliedPackage.equals(currentInputPackage)) {
+                                ACTIVE_KEY_COLOR.set(color);
+                            }
                         } catch (Throwable t) {
                             log("SoftKeyboardView draw begin failed " + t);
                         }
@@ -416,16 +539,19 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private void requestAndApply(InputMethodService ime, String why) {
+    private void requestAndApply(InputMethodService ime, String why, String requestedPackage) {
         try {
             Intent i = new Intent(StateReceiver.ACTION_GET);
             i.setComponent(new ComponentName(MODULE, RECEIVER));
+            if (requestedPackage != null && !requestedPackage.isEmpty()) {
+                i.putExtra(StateReceiver.KEY_REQUEST_PACKAGE, requestedPackage);
+            }
             ime.sendOrderedBroadcast(i, null, new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     try {
                         Bundle state = getResultExtras(false);
-                        applyState(ime, why, state);
+                        applyState(ime, why, requestedPackage, state);
                     } catch (Throwable t) {
                         log("state reply failed " + why + " " + t);
                     }
@@ -437,7 +563,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private void applyState(InputMethodService ime, String why, Bundle state) {
+    private void applyState(InputMethodService ime, String why, String requestedPackage, Bundle state) {
         try {
             if (state == null) {
                 log("no state reply at " + why);
@@ -451,6 +577,11 @@ public class XposedInit implements IXposedHookLoadPackage {
             long time = state.getLong(StateReceiver.KEY_TIME, 0L);
             String pkg = state.getString(StateReceiver.KEY_PACKAGE, "?");
             int adjust = state.getInt("adjust", 0);
+            if (requestedPackage != null && !requestedPackage.isEmpty()
+                    && !requestedPackage.equals(pkg)) {
+                log("state package mismatch requested=" + requestedPackage + " got=" + pkg + " at " + why);
+                return;
+            }
             if (color == 0 || Color.alpha(color) == 0) {
                 log("no usable colour at " + why);
                 return;
@@ -458,6 +589,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
             color = adjustBrightness(color, adjust);
             currentAppliedColor = color;
+            currentAppliedPackage = pkg == null ? "" : pkg;
             android.app.Dialog dialog = ime.getWindow();
             if (dialog == null || dialog.getWindow() == null) {
                 log("IME window unavailable at " + why);
@@ -477,10 +609,15 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Gboard often finishes constructing/rebinding its keyboard hierarchy shortly after
             // onStartInputView/onWindowShown. Re-apply once the final views are present.
             final int finalColor = color;
+            final String finalPackage = pkg;
             decor.postDelayed(() -> {
                 try {
+                    if (!finalPackage.equals(currentInputPackage)) {
+                        log("delayed apply skipped stale pkg=" + finalPackage + " current=" + currentInputPackage);
+                        return;
+                    }
                     int delayedChanged = applyKeyboardSurfaces(decor, finalColor, why + "/delayed");
-                    log("delayed apply " + why + " changed=" + delayedChanged);
+                    log("delayed apply " + why + " pkg=" + finalPackage + " changed=" + delayedChanged);
                 } catch (Throwable t) {
                     log("delayed apply failed " + why + " " + t);
                 }
@@ -573,6 +710,18 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
         if (targets.shrinkable != null) {
             logSurface("shrinkable(SKIPPED)", targets.shrinkable);
+            if (targets.keyboardHolder != null) {
+                int holderBottom = viewY(targets.keyboardHolder) + targets.keyboardHolder.getHeight();
+                int shrinkBottom = viewY(targets.shrinkable) + targets.shrinkable.getHeight();
+                int gap = shrinkBottom - holderBottom;
+                if (gap > 0 && gap <= 48) {
+                    targets.shrinkable.setBackground(new BottomStripDrawable(color, gap));
+                    targets.shrinkable.invalidate();
+                    changed++;
+                    log("bottom keyboard gap tint height=" + gap + " color="
+                            + String.format(Locale.US, "#%08X", color));
+                }
+            }
         }
         return changed;
     }
@@ -692,6 +841,31 @@ public class XposedInit implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("surface log failed " + label + " " + t);
         }
+    }
+
+    private static final class BottomStripDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int stripHeight;
+
+        BottomStripDrawable(int color, int stripHeight) {
+            paint.setColor(color);
+            this.stripHeight = stripHeight;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            canvas.drawRect(b.left, Math.max(b.top, b.bottom - stripHeight), b.right, b.bottom, paint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+
+        @Override
+        public void setColorFilter(android.graphics.ColorFilter colorFilter) { paint.setColorFilter(colorFilter); }
+
+        @Override
+        public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
     }
 
     private static final class SurfaceTargets {
